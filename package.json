@@ -1,0 +1,17 @@
+{
+  "name": "asset-portal",
+  "version": "1.0.0",
+  "description": "IT Asset Management Portal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.2",
+    "sqlite3": "^5.1.7"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}
