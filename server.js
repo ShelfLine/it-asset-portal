@@ -1,5 +1,5 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const mongoose = require('mongoose');
 const path = require('path');
 
 const app = express();
@@ -10,140 +10,153 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Database Setup
-const db = new sqlite3.Database('./inventory.db', (err) => {
-    if (err) console.error('Error opening database', err.message);
-    else console.log('Connected to SQLite database.');
+// Database Connection
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+    console.error("WARNING: MONGODB_URI environment variable is missing.");
+} else {
+    mongoose.connect(MONGODB_URI)
+        .then(() => console.log('Connected to MongoDB cloud database.'))
+        .catch(err => console.error('Error connecting to MongoDB:', err));
+}
+
+// Database Models
+const UserSchema = new mongoose.Schema({
+    username: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    role: { type: String, default: 'user' }
 });
+const User = mongoose.model('User', UserSchema);
 
-// Create Users and Entries Tables
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        role TEXT DEFAULT 'user'
-    )`);
+const EntrySchema = new mongoose.Schema({
+    system_name: String,
+    site_name: String,
+    processor: String,
+    generation: String,
+    make: String,
+    serial_number: String,
+    location: String,
+    user_name: String,
+    screen_make: String,
+    screen_serial_number: String,
+    created_at: { type: Date, default: Date.now }
+});
+const Entry = mongoose.model('Entry', EntrySchema);
 
-    db.run(`CREATE TABLE IF NOT EXISTS entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        system_name TEXT,
-        site_name TEXT,
-        processor TEXT,
-        generation TEXT,
-        make TEXT,
-        serial_number TEXT,
-        location TEXT,
-        user_name TEXT,
-        screen_make TEXT,
-        screen_serial_number TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, () => {
-        // Automatically add columns if upgrading from an older database version
-        db.run(`ALTER TABLE entries ADD COLUMN screen_make TEXT`, () => {});
-        db.run(`ALTER TABLE entries ADD COLUMN screen_serial_number TEXT`, () => {});
-    });
-
-    // Insert default admin account if it doesn't exist
-    db.get(`SELECT * FROM users WHERE username = ?`, ['admin'], (err, row) => {
-        if (!row) {
-            db.run(`INSERT INTO users (username, password, role) VALUES (?, ?, ?)`, ['admin', 'admin123', 'admin']);
+// Insert default admin account if it doesn't exist
+mongoose.connection.once('open', async () => {
+    try {
+        const adminExists = await User.findOne({ username: 'admin' });
+        if (!adminExists) {
+            await User.create({ username: 'admin', password: 'admin123', role: 'admin' });
+            console.log('Default admin user created.');
         }
-    });
+    } catch (err) {
+        console.error('Error seeding admin:', err);
+    }
 });
 
 // API: Login User
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
-    const query = `SELECT * FROM users WHERE username = ? AND password = ?`;
-    
-    db.get(query, [username, password], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!row) return res.status(401).json({ error: 'Invalid username or password.' });
+app.post('/api/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        const user = await User.findOne({ username, password });
         
-        res.json({ message: 'Login successful', username: row.username, role: row.role });
-    });
+        if (!user) return res.status(401).json({ error: 'Invalid username or password.' });
+        res.json({ message: 'Login successful', username: user.username, role: user.role });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // API: Admin creates a new user
-app.post('/api/admin/users', (req, res) => {
-    const { username, password } = req.body;
-    const query = `INSERT INTO users (username, password, role) VALUES (?, ?, 'user')`;
-    
-    db.run(query, [username, password], function(err) {
-        if (err) {
-            return res.status(400).json({ error: 'Username already exists or invalid data.' });
-        }
+app.post('/api/admin/users', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        await User.create({ username, password, role: 'user' });
         res.json({ message: 'User created successfully!' });
-    });
+    } catch (err) {
+        res.status(400).json({ error: 'Username already exists or invalid data.' });
+    }
 });
 
 // API: Admin gets all users
-app.get('/api/admin/users', (req, res) => {
-    db.all(`SELECT id, username, role FROM users`, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({}, 'username role _id');
+        // Rename _id to id so your frontend still works
+        const formattedUsers = users.map(u => ({ id: u._id, username: u.username, role: u.role }));
+        res.json(formattedUsers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // API: Admin updates a user
-app.put('/api/admin/users/:id', (req, res) => {
-    const { id } = req.params;
-    const { username, password } = req.body;
-    
-    let query, params;
-    if (password && password.trim() !== '') {
-        query = `UPDATE users SET username = ?, password = ? WHERE id = ?`;
-        params = [username, password, id];
-    } else {
-        query = `UPDATE users SET username = ? WHERE id = ?`;
-        params = [username, id];
-    }
+app.put('/api/admin/users/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { username, password } = req.body;
+        
+        const updateData = { username };
+        if (password && password.trim() !== '') {
+            updateData.password = password;
+        }
 
-    db.run(query, params, function(err) {
-        if (err) return res.status(400).json({ error: 'Username already exists or invalid data.' });
+        await User.findByIdAndUpdate(id, updateData);
         res.json({ message: 'User updated successfully!' });
-    });
+    } catch (err) {
+        res.status(400).json({ error: 'Invalid data or user not found.' });
+    }
 });
 
 // API: Admin deletes a user
-app.delete('/api/admin/users/:id', (req, res) => {
-    const { id } = req.params;
-    db.run(`DELETE FROM users WHERE id = ?`, [id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+app.delete('/api/admin/users/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await User.findByIdAndDelete(id);
         res.json({ message: 'User deleted successfully!' });
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // API: Add a new entry
-app.post('/api/entries', (req, res) => {
-    const { system_name, site_name, processor, generation, make, serial_number, location, user_name, screen_make, screen_serial_number } = req.body;
-    
-    const query = `INSERT INTO entries (system_name, site_name, processor, generation, make, serial_number, location, user_name, screen_make, screen_serial_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
-    db.run(query, [system_name, site_name, processor, generation, make, serial_number, location, user_name, screen_make, screen_serial_number], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: 'Entry added successfully!', id: this.lastID });
-    });
+app.post('/api/entries', async (req, res) => {
+    try {
+        const newEntry = await Entry.create(req.body);
+        res.json({ message: 'Entry added successfully!', id: newEntry._id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // API: Get all entries (for Admin)
-app.get('/api/entries', (req, res) => {
-    db.all(`SELECT * FROM entries ORDER BY created_at DESC`, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+app.get('/api/entries', async (req, res) => {
+    try {
+        const entries = await Entry.find().sort({ created_at: -1 });
+        const formattedEntries = entries.map(e => ({...e.toObject(), id: e._id}));
+        res.json(formattedEntries);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // API: Delete an asset entry
-app.delete('/api/entries/:id', (req, res) => {
-    const { id } = req.params;
-    db.run(`DELETE FROM entries WHERE id = ?`, [id], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+app.delete('/api/entries/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await Entry.findByIdAndDelete(id);
         res.json({ message: 'Entry deleted successfully!' });
-    });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
 });
+
+// Required for Vercel Serverless compatibility
+module.exports = app;
